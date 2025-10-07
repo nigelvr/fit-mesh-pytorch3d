@@ -1,5 +1,5 @@
 
-# object reconstruction with pytorch3d
+# fitting a mesh pytorch3d
 
 Takes several images of an object using renderers built into pytorch3d: a renderer with phong shading, and a silhouette renderer
 
