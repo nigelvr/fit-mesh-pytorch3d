@@ -58,71 +58,49 @@ def visualize_prediction(predicted_mesh, renderer, target_image, title='', silho
         plt.show()
     plt.close()
 
-class Scene:
-    def __init__(self, mesh, cameras, lights, renderer, device, target=True):
-        self.mesh = mesh
-        self.cameras = cameras
-        self.lights = lights
-        self.renderer = renderer
-        self._rendered = None
-        if target:
-            imgs = self.render_all()
-            self._rendered = imgs.detach().to(device)
-    
-    def render_all(self):
-        if self._rendered is not None:
-            return self._rendered
-        rgbs = list()
-        for k in range(len(self.cameras)):
-            rgbs.append(self.renderer(self.mesh, cameras=self.cameras[[k]], lights=self.lights))
-        return torch.cat(rgbs, dim=0)
-    
-    def update_mesh(self, mesh):
-        self.mesh = mesh
+def display_mesh(mesh, renderer, cameras, title):
+    images = renderer(mesh, cameras=cameras)
+    plt.figure(figsize=(20, 10))
+    plt.imshow(images[0])
+    #plt.subplot(1, 2, 1)
+    #plt.imshow(predicted_images[0, ..., inds].cpu().detach().numpy())
+    #plt.subplot(1, 2, 2)
+    #plt.imshow(target_image.cpu().detach().numpy())
+    #plt.title(title)
+    plt.axis("off")
+    plt.show()
+    plt.close()    
 
-    @property
-    def images(self):
-        return self.render_all()
-    
-    @property
-    def target_rgbs(self):
-        return self.images[..., :3]
-    
-    @property
-    def target_sils(self):
-        return self.images[..., 3]
-    
-    def diff(self, scene_rgb, scene_sil, camera_batch_size=2):
-        weight_rgb = 1.0
-        weight_sil = 1.0
-        weight_edge = 1.0
-        weight_normal = 0.01
-        weight_laplacian = 1.0
+def mesh_loss(mesh, cameras, renderer, lights, target_sils, target_rgbs, camera_batch_size=2):
+    weight_rgb = 1.0
+    weight_sil = 1.0
+    weight_edge = 1.0
+    weight_normal = 0.01
+    weight_laplacian = 1.0
 
-        loss_edge = mesh_edge_loss(self.mesh)
-        loss_normal = mesh_normal_consistency(self.mesh)
-        loss_laplacian = mesh_laplacian_smoothing(self.mesh, method="uniform")
-        loss_sil = 0
-        loss_rgb = 0
+    loss_edge = mesh_edge_loss(mesh)
+    loss_normal = mesh_normal_consistency(mesh)
+    loss_laplacian = mesh_laplacian_smoothing(mesh, method="uniform")
+    loss_sil = 0
+    loss_rgb = 0
 
-        for j in np.random.permutation(len(self.cameras)).tolist()[:camera_batch_size]:
-            images = self.renderer(self.mesh, cameras=self.cameras[[j]], lights=self.lights)
-            rgb = images[..., :3]
-            sil = images[..., 3]
-            loss_sil += ((sil - scene_sil.target_sils[j]) ** 2).mean()/camera_batch_size
-            loss_rgb += ((rgb - scene_rgb.target_rgbs[j]) ** 2).mean()/camera_batch_size
+    for j in np.random.permutation(len(cameras)).tolist()[:camera_batch_size]:
+        images = renderer(mesh, cameras=cameras[[j]], lights=lights)
+        rgb = images[..., :3]
+        sil = images[..., 3]
+        loss_sil += ((sil - target_sils[j]) ** 2).mean()/camera_batch_size
+        loss_rgb += ((rgb - target_rgbs[j]) ** 2).mean()/camera_batch_size
 
-        loss = weight_rgb*loss_rgb + weight_sil*loss_sil + weight_edge*loss_edge + weight_normal*loss_normal + weight_laplacian*loss_laplacian
-        
-        return loss
+    loss = weight_rgb*loss_rgb + weight_sil*loss_sil + weight_edge*loss_edge + weight_normal*loss_normal + weight_laplacian*loss_laplacian
     
-def train(
-        target_scene_rgb,
-        target_scene_sil,
-        src_mesh, 
-        renderer, 
+    return loss
+    
+def train(src_mesh,
+        target_rgbs,
+        target_sils,
         target_cameras, 
-        lights, 
+        lights,
+        renderer,
         epochs, 
         device):
 
@@ -132,20 +110,16 @@ def train(
     optimizer = torch.optim.Adam([deform_verts, sphere_verts_rgb], lr=1e-2)
 
     new_src_mesh = src_mesh.offset_verts(deform_verts)
-    opt_scene = Scene(new_src_mesh, target_cameras, lights, renderer, device, target=False)
-
     for i in range(0, epochs):
         optimizer.zero_grad()
 
         new_src_mesh = src_mesh.offset_verts(deform_verts)
         new_src_mesh.textures = TexturesVertex(verts_features=sphere_verts_rgb)
 
-        opt_scene.update_mesh(new_src_mesh)
+        sum_loss = mesh_loss(new_src_mesh, target_cameras, renderer, lights, target_sils, target_rgbs)
 
-        sum_loss = opt_scene.diff(target_scene_rgb, target_scene_sil)
-
-        print(f"Loss requires_grad: {sum_loss.requires_grad}")  # Should be True
-        print(f"Loss grad_fn: {sum_loss.grad_fn}")  # Should not be None (e.g., <AddBackward0> or similar)
+        print(f"Loss requires_grad: {sum_loss.requires_grad}")
+        print(f"Loss grad_fn: {sum_loss.grad_fn}")  
 
         print(f'epoch {i}/{epochs} : loss = {sum_loss}')
         
@@ -154,7 +128,7 @@ def train(
         print(f"deform_verts grad norm: {deform_verts.grad.norm().item() if deform_verts.grad is not None else 'None'}")
         print(f"sphere_verts_rgb grad norm: {sphere_verts_rgb.grad.norm().item() if sphere_verts_rgb.grad is not None else 'None'}")
 
-        visualize_prediction(new_src_mesh, renderer, target_scene_rgb.target_rgbs[1], f'epoch {i}/{epochs}', False, f"frame{i}.png")
+        visualize_prediction(new_src_mesh, renderer, target_rgbs[1], f'epoch {i}/{epochs}', False, f"frame{i}.png")
 
         optimizer.step()
     return new_src_mesh
@@ -220,8 +194,6 @@ def get_textured_renderer(device, default_camera, lights):
     )
     return renderer_textured
 
-
-
 def main():
     assert len(sys.argv) == 3, f'usage: {sys.argv[1]} <device> <epochs>'
     os.makedirs('png', exist_ok=True)
@@ -237,31 +209,34 @@ def main():
     rgb_renderer = get_textured_renderer(device, default_camera, lights)
     silhouette_renderer = get_silhouette_renderer(default_camera)
 
-    rgb_scene = Scene(mesh, cameras, lights, rgb_renderer, device)
-    sil_scene = Scene(mesh, cameras, lights, silhouette_renderer, device)
-    
+    display_mesh(mesh, rgb_renderer, cameras[[1]], "mesh")
 
     print('rendered target images')
-    
+    # target images
+    rgb_l, sil_l = list(), list()
+    for k in range(len(cameras)):
+        rgb_l.append(rgb_renderer(mesh, cameras=cameras[[k]], lights=lights))
+        sil_l.append(silhouette_renderer(mesh, cameras=cameras[[k]], lights=lights))
+    target_rgbs = torch.cat(rgb_l, dim=0)[...,:3]
+    target_sils = torch.cat(sil_l, dim=0)[...,3]
 
-    src_mesh = ico_sphere(4, device)
+    src_mesh = ico_sphere(4, device) # initial mesh to deform into the target shape
 
     new_src_mesh = train(
-        rgb_scene,
-        sil_scene,
         src_mesh,
-        rgb_renderer,
-        cameras,
+        target_rgbs,
+        target_sils,
+        cameras, 
         lights,
-        epochs,
+        rgb_renderer,
+        epochs, 
         device
     )
 
-    target_rgb = rgb_scene.target_rgbs
     visualize_prediction(
         new_src_mesh,
         renderer=rgb_renderer,
-        target_image=target_rgb[1],
+        target_image=target_rgbs[1],
         silhouette=False
     )
 
